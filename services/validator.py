@@ -21,6 +21,11 @@ class StrategyValidator:
         if params.get("mainExchange") not in allowed_exchanges:
             errors.append(f"Invalid Exchange. Must be one of: {', '.join(allowed_exchanges)}")
             
+        # Segment
+        allowed_segments = ["FUT", "OPT", "INDEX", "Stock"]
+        if params.get("mainSegment") not in allowed_segments:
+            errors.append(f"Invalid Segment. Must be one of: {', '.join(allowed_segments)}")
+            
         # Trading Type
         if params.get("isIntraday") not in [True, False]:
             errors.append("Trading Type must be Intraday (True) or Positional (False).")

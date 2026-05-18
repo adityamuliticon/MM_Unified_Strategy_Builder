@@ -10,8 +10,21 @@ class MarketMayaService:
 
     def deploy_strategy(self, payload):
         """
-        Deploys a strategy to Market Maya with a curl-based fallback.
+        Deploys a strategy to Market Maya and logs the payload.
         """
+        # Log the payload to a file
+        from datetime import datetime
+        try:
+            with open("deployed_strategies.log", "a") as f:
+                log_entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "strategy_name": payload.get("strategyName", "Unknown"),
+                    "payload": payload
+                }
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            print(f"Logging error: {e}")
+
         headers = {
             "Authorization": self.token,
             "Content-Type": "application/json",
