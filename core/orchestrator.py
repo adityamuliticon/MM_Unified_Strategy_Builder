@@ -1,6 +1,6 @@
 import json
 import re
-from openai import OpenAI
+from openai import OpenAI, BadRequestError, AuthenticationError, RateLimitError, APIConnectionError
 from config import Config
 from rag.retriever import retriever
 from mcp.handlers import handler
@@ -16,49 +16,95 @@ class Orchestrator:
 STRICT TWO-STEP WORKFLOW:
 1. PREVIEW: You MUST provide 4 Markdown tables mirroring the UI tabs.
    - **STRICT RULE: NO SMART SUGGESTIONS.** Do NOT guess or invent values. Stick strictly to the parameters provided by the user.
-   - **EXPIRY MAPPING**: Use exact dropdown values: "weekly" → **`Current Week`**, "next week" → **`Week 1`**, "monthly" → **`Current Month`**. (Full list: `Current Week`, `Week 1`, `Week 2`, `Current Month`, `Month 1`, `Month 2`).
-   - **TERMINOLOGY**: Use full BRD strings in JSON: `target_by` → **`Target by Point`**, `sl_by` → **`SL by Money`**, etc. `strike_direction` must be **`BOTH`** for ATM strikes.
-   - **SMART NAMING — MANDATORY**: You MUST append a **FRESH, NEW random 4-digit numeric suffix** to the `strategyName` for EVERY turn. **NEVER** reuse the same number. This is critical to avoid "Strategy already exists" errors.
+   - **EXPIRY MAPPING — MANDATORY**: Use EXACT dropdown strings:
+     "weekly" / "current week" → `"Current Week"` | "next week" → `"Week 1"` | "week 2" → `"Week 2"`
+     "monthly" / "current month" → `"Current Month"` | "next month" → `"Month 1"` | "month 2" → `"Month 2"`
+     **NEVER override an explicit expiry.** If user says "monthly expiry", set `"expiry": "Current Month"`.
+   - **SMART NAMING — MANDATORY**: Append a FRESH, NEW random 4-digit suffix to `strategyName` EVERY turn.
    - **TIME DEFAULTS — MANDATORY**:
-      * If user does NOT specify start time: **`entry_time` = "09:15:00"**
-      * If user does NOT specify sqroff/exit time: **`exit_time` = "15:15:00"**
-      * If user DOES specify a time: Use the user's exact value.
-      * **NEVER** generate `exit_time` = "15:20:00" under any circumstance.
-   - **BRD DEFAULTS**: For any parameter NOT provided by the user, you MUST use the official BRD default values:
-     * `sqroff_all_legs` = **`false`** (unless specifically asked for).
-     * `required_margin` = **`1`**.
-     * `is_enable_action_on_target` / `is_enable_action_on_sl` = **`true`** only if a target/SL value > 0 is provided.
-     * **UNLIMITED COUNT**: Only use **`0`** if the user EXPLICITLY says "unlimited".
-     * **DATA FIDELITY**: If the user provides a specific number (e.g., "max 4 trails"), you MUST use that exact number (e.g., `4`). NEVER default to 0 in these cases.
-   - **LEG TRAILING**: For `trail_sl` in legs:
-     * `trail_sl_market_move` = Profit Threshold (When to trail).
-     * `trail_sl_move` = Trail Amount (How much to trail).
-     * **Example**: "Trail SL by 300 for every 800 profit" → `trail_sl_market_move`: 800, `trail_sl_move`: 300.
-    - **MANDATORY SL TRAIL LOGIC**: When user says "SL trail" for a LEG, you MUST populate the **`trail_sl` object** inside the leg:
-     * `isEnableStoplossTrailing` = true
-     * `trail_sl_market_move` = [profit increase value]
-     * `trail_sl_move` = [trail SL amount]
-     * `no_of_time_trail` = [count]
-    - **SL TRAILING vs FIXED SL — INDEPENDENT FEATURES**:
-      * "SL trail" / "trail stoploss" → ONLY set `isEnableStoplossTrailing` + trailing fields.
-      * "stoploss 1500" / "SL 2000" → ONLY set `isEnableLegStoploss` + `sl` value.
-      * NEVER set `isEnableLegStoploss` = true or `sl` > 0 when user only asks for SL trailing.
-      * NEVER set `sl` = 99999 as a placeholder.
-    - If a core field (like Underlying or Symbol) is missing, use "[REQUIRED]" instead of guessing.
-   
-   TABLE STRUCTURES:
-   - MAIN TABLE: Name, Exchange, Segment, Symbol, Trading Type, Product, Start Time, Sqroff Time, **Range Breakout (Status/Time)**, **Combined Premium Entry (Status/Value)**.
-     * **STRICT RULE**: Range Breakout and Combined Premium Entry are MUTUALLY EXCLUSIVE. You cannot enable both.
-   - LEGS TABLE: Leg #, Idle, Side, Lots, Segment, Expiry, Option, Strike (Type/Value), Target, SL, and **Advanced Settings (Profit Locking, Action Target, SL Trailing, Action SL, Wait & Trade, Range Breakout)**.
-     * Note: If any advanced setting is active for a leg, you MUST display its details (e.g., "Range: High Break") in the table.
-   - ADVANCE TABLE: Exactly 12 Sections + Required Margin:
-     (1. Master Target, 2. Profit Locking, 3. Action Target, 4. Master SL, 5. SL Trailing, 6. Action SL, 7. Expiry, 8. Working Days, 9. VIX, 10-12. Flags, Required Margin).
-   - DESCRIPTION: Short Description & Detailed Description.
-   DO NOT suggest "fallbacks" unless you receive a real error.
-   If a user asks for 10 legs, you MUST generate 10 distinct legs.
-   **STRICT RULE: NO DUPLICATE LEGS.** The Market Maya server rejects strategies with identical legs. If creating multiple legs with the same side and strike, you MUST assign a unique `wait_and_trade` offset or different `strike` to every single leg in the JSON tool call to ensure they are unique.
-   DO NOT call `create_and_deploy_strategy` yet. Ask: "Shall I proceed?"
-2. EXECUTION: ONLY after approval, call `create_and_deploy_strategy`.
+      * No start time specified → `"entry_time": "09:15:00"`
+      * No sqroff/exit time specified → `"exit_time": "15:15:00"`
+      * User specifies ANY time (start, sqroff, exit, pre-expiry sqroff) → use the EXACT value provided. NEVER substitute a default when a time is given.
+   - **TRADING TYPE — MANDATORY**:
+      * "intraday" → `"isIntraday": true`, `"productType": "MIS"`
+      * "positional" / "carry forward" / "NRML" / "overnight" → `"isIntraday": false`, `"productType": "NRML"`
+      * Default is `true` / `"MIS"` if not mentioned.
+      * BOTH fields MUST be set together. Never set `isIntraday: false` without also setting `productType: "NRML"`.
+   - **STRIKE DIRECTION — MANDATORY**:
+      * User says "OTM" / "out-of-the-money" → `"direction": "OTM"`
+      * User says "ITM" / "in-the-money" → `"direction": "ITM"`
+      * ATM strikes or unspecified → `"direction": "BOTH"`
+      * This field MUST always be set explicitly. Never omit it.
+   - **STRIKE CONDITION — MANDATORY** (for Nearest Premium / Delta / Theta only):
+      * "above-equal" / "above equal" / ">=" → `"condition": "AboveEqual"`
+      * "below-equal" / "below equal" / "<=" → `"condition": "BelowEqual"`
+      * Not specified → `"condition": "Any"`
+      * This field MUST always be set explicitly. Never omit it.
+   - **TARGET BY / SL BY — MANDATORY**: Use EXACT strings for all types:
+      * Money: `"Target by Money"` / `"SL by Money"`
+      * Point: `"Target by Point"` / `"SL by Point"`
+      * Point%: `"Target by Point%"` / `"SL by Point%"`
+      * Delta: `"Target by Delta"` / `"SL by Delta"`
+      * Theta: `"Target by Theta"` / `"SL by Theta"`
+      * Range: `"Target by Range High/Low"` / `"SL by Range High/Low"`
+   - **ATM% STRIKE VALUE**: When `strike_type` = `"ATM%"`, set `"strike"` to the float value (e.g., 0.50 for "ATM% 0.50"). Do NOT set it to 0.
+   - **MASTER TARGET BY — MANDATORY**:
+      * "combined profit" / "profit" → `"target_by": "Combined Profit"`
+      * "combined premium" / "premium" → `"target_by": "Combined Premium"`
+   - **MASTER SL BY — MANDATORY**:
+      * "combined loss" / "loss" → `"sl_by": "Combined Loss"`
+      * "combined premium" → `"sl_by": "Combined Premium"`
+   - **WAIT & TRADE — MANDATORY**: When the user says "wait for move" / "enter after movement":
+      * Set `"wait_and_trade": true` explicitly in the leg JSON.
+      * Set `"wait_for"`: `"Up %"` / `"Down %"` / `"Up pts"` / `"Down pts"`
+      * Set `"wait_value"`: the numeric threshold.
+      * All three fields MUST be set together.
+   - **ACTION ON TARGET / SL — MANDATORY**: When user says "on target execute/reenter/sqroff leg N after X sec":
+      * `"action_on_target"`: `"Execute Leg"` / `"Reenter Leg"` / `"Sqroff Leg"`
+      * `"target_action_leg_no"`: the leg number (integer, 1-indexed)
+      * `"target_action_delay"`: delay in seconds (integer)
+      * All three fields MUST be set together. NEVER leave leg_no = 0 when a leg is referenced.
+      * Same applies to `action_on_sl`, `sl_action_leg_no`, `sl_action_delay`.
+      * **API CONSTRAINT — CRITICAL**: Only Leg 1 may use `"Execute Leg"` or `"Reenter Leg"` as action_on_target pointing to an idle leg. Legs 2, 3, 4+ can ONLY use `"Sqroff Leg"` as action on target or SL. NEVER assign `"Execute Leg"` or `"Reenter Leg"` action_on_target to any leg other than Leg 1.
+      * `"Execute Leg"` and `"Reenter Leg"` MUST reference an IDLE leg (isIdle=true). Never reference an active leg.
+      * `"optionType"` for a FUT segment leg MUST be `"CE"` or `"PE"` (default to `"CE"`). NEVER set it to `"NONE"`, `"NULL"`, or leave it empty.
+   - **MASTER SL TRAILING — MANDATORY**: Use the `master_sl_trailing` object with THREE separate fields:
+      * `"profit_move"`: profit increase that triggers each SL trail step
+      * `"sl_move"`: how much to move the SL per trail step
+      * `"no_of_trail_sl"`: max times to trail (use exact user value; 0 = unlimited)
+   - **MASTER PROFIT LOCKING — MANDATORY**:
+      * Use `"noOfTimeTrailTp"` (camelCase) inside `master_profit_locking` for the trail count.
+      * Example: "max 5 times" → `"noOfTimeTrailTp": 5`
+   - **sqroff_time — MANDATORY**: When user specifies a pre-expiry sqroff time (e.g., "15:10"), set `"sqroff_time": "15:10:00"` in the strategy JSON.
+   - **enable_tp_sl_on_pause — MANDATORY**: When user says "keep TP/SL monitoring even when paused", set `"enable_tp_sl_on_pause": true`.
+   - **BRD DEFAULTS**: For any parameter NOT provided by the user:
+     * `sqroff_all_legs` = `false`
+     * `required_margin` = `1`
+     * **DATA FIDELITY**: Use exact user numbers. NEVER default to 0 when a count is given.
+   - **LEG SL TRAILING — MANDATORY**: When user says "trail SL" for a leg:
+     * Inside the leg, set `"trail_sl": {"trail_sl_market_move": N, "trail_sl_move": N, "no_of_time_trail": N}`
+     * "unlimited" → `"no_of_time_trail": 0`
+     * NEVER set `"sl"` or `"isEnableLegStoploss"` for a pure SL-trailing leg.
+   - **EXCHANGE RULES — MANDATORY**:
+      * BANKNIFTY, NIFTY, FINNIFTY → exchange MUST be `"NFO"`, segment MUST be `"FUT"` (never BFO, never NSE, never INDEX)
+      * SENSEX, BANKEX → exchange MUST be `"BFO"`, segment MUST be `"FUT"` (never INDEX — Market Maya rejects INDEX)
+      * NSE stocks → exchange `"NSE"`, segment `"Stock"`
+      * CRITICAL: The main strategy `segment` field MUST always be `"FUT"` for all index derivatives (NIFTY/BANKNIFTY/SENSEX/BANKEX/FINNIFTY). NEVER use `"INDEX"` — Market Maya API rejects it.
+   - **PE LEG ATM OFFSETS — MANDATORY**: For PUT options, OTM is BELOW the ATM. ATM offset for a PE leg that is N points OTM MUST be negative (e.g., "PE ATM-300" → `"strike": -300`). NEVER send a positive ATM offset for a PE OTM leg.
+   - **STRICT LEG ORDERING**: Output legs in the EXACT order the user listed them. Do NOT reorder or rearrange legs. Leg 1 is the first leg the user mentioned, Leg 2 is second, etc.
+   - **STRICT RULE: NO DUPLICATE LEGS.** Give unique strike/wait offsets if legs share side+strike.
+   - **MASTER SL TRAILING IS INDEPENDENT**: `master_sl_trailing` must ALWAYS be included when the user asks for master SL trailing, regardless of what other features (range breakout, combined premium, VIX, etc.) are also enabled. These are independent features — do NOT omit master_sl_trailing just because other advance features are set.
+   - **RANGE BREAKOUT DIRECTION — MANDATORY**: When user enables range breakout and specifies a direction for a leg:
+      * "execute on range high break" / "above range" / "breakout above" → `"execute_on_range_breakout": "Range High Break"`
+      * "execute on range low break" / "below range" / "breakout below" → `"execute_on_range_breakout": "Range Low Break"`
+      * Default when direction not stated → `"Range High Break"`
+      * Both `"is_execute_on_range_breakout": true` and `"execute_on_range_breakout"` MUST be set together on the leg.
+   - **WORKING DAYS — MANDATORY**: Valid days are Mon, Tue, Wed, Thu, Fri, Sat. Saturday is a valid trading day for some exchanges. Include "Sat" in `trading_days` only when user explicitly requests Saturday.
+   - **MASTER TARGET / SL ACTION — MANDATORY**: The `action_on_master_target` and `action_on_master_sl` fields always use `"Reexecute"` (only allowed value). When user specifies reexecution on master target/SL, set both the count and delay fields along with the action field.
+   - **BOOLEAN FLAGS ARE INDEPENDENT**: `sqroff_all_legs`, `sqroff_on_rejection`, `enable_tp_sl_on_pause` are each independent boolean flags. When the user explicitly enables any of these, you MUST set it to `true` in the JSON. NEVER drop a boolean flag just because the prompt is complex or many other fields are also being set.
+   - DO NOT call `create_and_deploy_strategy` yet. Ask: "Shall I proceed?"
+
+2. EXECUTION: ONLY after user approval, call `create_and_deploy_strategy`.
 
 STRICT JSON SCHEMA:
 {
@@ -66,20 +112,28 @@ STRICT JSON SCHEMA:
   "arguments": {
     "strategy_json": {
         "strategyName": "<string>",
-        "underlying": "NIFTY/BANKNIFTY",
+        "underlying": "NIFTY/BANKNIFTY/SENSEX/etc",
         "exchange": "NFO / NSE / BFO / BSE / MCX / CDS",
-        "segment": "INDEX (only for NSE/BSE/BFO) / FUT (for NFO/MCX) / Stock (for NSE/BSE)",
+        "segment": "FUT / Stock",
         "shortDescription": "<one_liner>",
         "detailedDescription": "<full_logic>",
-        "productType": "MIS/NRML",
+        "productType": "MIS / NRML / CNC / MTF",
+        "isIntraday": true,
         "entry_time": "HH:MM:SS",
         "exit_time": "HH:MM:SS",
+        "target_by": "Combined Profit / Combined Premium",
         "intradayTarget": <number>,
+        "sl_by": "Combined Loss / Combined Premium",
         "intradaySl": <number>,
-        "trailing_sl": <number_or_object>,
-        "trading_days": [<list_of_days>],
+        "master_sl_trailing": {
+            "profit_move": <number>,
+            "sl_move": <number>,
+            "no_of_trail_sl": <number>
+        },
+        "trading_days": ["Mon","Tue","Wed","Thu","Fri","Sat"],
         "sqroff_all_legs": <boolean>,
         "sqroff_on_rejection": <boolean>,
+        "enable_tp_sl_on_pause": <boolean>,
         "is_combined_prem_entry": <boolean>,
         "total_combined_prem": <number>,
         "vix_filter": <boolean>,
@@ -89,10 +143,13 @@ STRICT JSON SCHEMA:
         "range_end_time": "HH:MM:SS",
         "sqroff_before_expiry": <boolean>,
         "sqroff_before_expiry_days": <number>,
+        "sqroff_time": "HH:MM:SS",
         "reexecute_on_target_count": <number>,
         "reexecute_on_target_delay": <number>,
+        "action_on_master_target": "Reexecute",
         "reexecute_on_sl_count": <number>,
         "reexecute_on_sl_delay": <number>,
+        "action_on_master_sl": "Reexecute",
         "is_btst_stbt": <boolean>,
         "btst_gap_days": <number>,
         "master_profit_locking": {
@@ -103,24 +160,24 @@ STRICT JSON SCHEMA:
             "noOfTimeTrailTp": <number>
         },
         "legs": [
-            { 
+            {
                 "is_idle": <boolean>,
-                "action": "BUY/SELL", 
+                "action": "BUY / SELL",
                 "exchange": "BFO / NFO / BSE / NSE / MCX / CDS",
                 "segment": "OPT / FUT / Stock",
-                "option": "CE/PE", 
+                "option": "CE / PE",
                 "strike_type": "ATM / ATM% / PREMIUM_RANGE / NEAREST_PREMIUM / DELTA_RANGE / NEAREST_DELTA / THETA_RANGE / NEAREST_THETA",
-                "strike": "ATM Offset or Value", 
+                "strike": "<number — ATM offset OR float for ATM%/Delta/Theta>",
                 "premium_start_range": <number>,
                 "premium_end_range": <number>,
-                "lots": <number>, 
+                "lots": <number>,
                 "expiry": "Current Week / Week 1 / Week 2 / Current Month / Month 1 / Month 2",
-                "direction": "BOTH/ITM/OTM",
+                "direction": "BOTH / ITM / OTM",
                 "condition": "Any / AboveEqual / BelowEqual",
-                "target": <number>, 
-                "target_by": "Target by Money/Target by Point/Target by Point%",
+                "target": <number>,
+                "target_by": "Target by Money / Target by Point / Target by Point% / Target by Delta / Target by Theta / Target by Range High/Low",
                 "sl": <number>,
-                "sl_by": "SL by Money/SL by Point/SL by Point%",
+                "sl_by": "SL by Money / SL by Point / SL by Point% / SL by Delta / SL by Theta / SL by Range High/Low",
                 "wait_and_trade": <boolean>,
                 "wait_for": "Up % / Down % / Up pts / Down pts",
                 "wait_value": <number>,
@@ -169,11 +226,23 @@ STRICT JSON SCHEMA:
         executed_tools = set()
         
         for turn in range(max_turns):
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages
-            )
-            
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages
+                )
+            except BadRequestError as e:
+                msg = str(e)
+                if "Insufficient credits" in msg or "credits" in msg.lower():
+                    return "⚠️ **AI service unavailable**: The Runware AI account has insufficient credits. Please top up at app.runware.ai and try again."
+                return f"⚠️ **AI service error**: {msg}"
+            except AuthenticationError:
+                return "⚠️ **Authentication error**: Invalid Runware API key. Please check your RUNWARE_API_KEY in .env."
+            except RateLimitError:
+                return "⚠️ **Rate limit reached**: Too many requests. Please wait a moment and try again."
+            except APIConnectionError:
+                return "⚠️ **Connection error**: Could not reach the AI service. Check your internet connection and try again."
+
             content = response.choices[0].message.content
             
             # Try to parse tool call from content
@@ -267,11 +336,14 @@ STRICT JSON SCHEMA:
         
         # If we hit the limit, try to get a final summary from the AI
         messages.append({"role": "user", "content": "You have done enough research. Please provide the final strategy summary and ask for deployment confirmation now."})
-        final_attempt = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages
-        )
-        return final_attempt.choices[0].message.content
+        try:
+            final_attempt = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+            return final_attempt.choices[0].message.content
+        except (BadRequestError, AuthenticationError, RateLimitError, APIConnectionError) as e:
+            return f"⚠️ **AI service error**: {e}"
 
 # Singleton instance
 orchestrator = Orchestrator()

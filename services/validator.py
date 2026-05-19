@@ -22,7 +22,7 @@ class StrategyValidator:
             errors.append(f"Invalid Exchange. Must be one of: {', '.join(allowed_exchanges)}")
             
         # Segment
-        allowed_segments = ["FUT", "OPT", "INDEX", "Stock"]
+        allowed_segments = ["FUT", "OPT", "Stock"]
         if params.get("mainSegment") not in allowed_segments:
             errors.append(f"Invalid Segment. Must be one of: {', '.join(allowed_segments)}")
             

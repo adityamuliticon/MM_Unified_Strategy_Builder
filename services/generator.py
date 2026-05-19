@@ -1,148 +1,183 @@
 import json
+import math
 import re
 from config import Config
 
 class PayloadGenerator:
     def __init__(self):
-        # The strategyTypeId for Unified Strategy Builder from sample payload
         self.strategy_type_id = "7D0enBHWMRaf4ebeKaB0$OOMQaC0$aC0$"
 
     def generate_v3_payload(self, main_params, legs):
-        """
-        Generates a comprehensive V3 payload compatible with Market Maya's CreateUnifiedStrategy API.
-        """
-        # Determine Exchange, Segment, and Symbol dynamically
         exchange = main_params.get("exchange", main_params.get("mainExchange", "NFO")).upper()
-        segment = main_params.get("segment", main_params.get("mainSegment", "FUT")).upper()
+        segment_raw = main_params.get("segment", main_params.get("mainSegment", "FUT"))
+        segment = segment_raw.upper()
+        if segment == "STOCK":
+            segment = "Stock"
         symbol = main_params.get("symbol", main_params.get("mainSymbol", main_params.get("underlying", "NIFTY"))).upper()
-        
-        # If symbol contains spaces, it's already a full underlying string; extract the first part
-        if " " in symbol: symbol = symbol.split()[0]
-        if symbol == "NIFTY50": symbol = "NIFTY"
-        
-        # AUTO-CORRECTION: NFO does not have an INDEX segment. 
-        # If user/AI asks for NFO + INDEX, we must use FUT to make it work in Market Maya.
-        if exchange == "NFO" and segment == "INDEX":
+
+        if " " in symbol:
+            symbol = symbol.split()[0]
+        if symbol == "NIFTY50":
+            symbol = "NIFTY"
+
+        # Market Maya never accepts "INDEX" as a segment — always use FUT for index derivatives
+        if segment == "INDEX":
             segment = "FUT"
-            
-        # Construct the official Underlying string for the API
+
         underlying = f"{symbol} {segment} {exchange}"
 
-        # 1. LEG GENERATION FIRST - To detect leg-specific settings that override master settings
+        # ── Legs ─────────────────────────────────────────────────────────────
         generated_legs = []
-        any_leg_has_tsl = False
         for leg_input in (legs if isinstance(legs, list) else []):
             leg_payload = self._generate_leg_payload(leg_input, exchange, symbol)
-            if leg_payload.get("isEnableStoplossTrailing"):
-                any_leg_has_tsl = True
             generated_legs.append(leg_payload)
 
-        # Determine if Master Target/SL should be enabled
+        # ── Master Target / SL ────────────────────────────────────────────────
         target_val = int(main_params.get("intradayTarget", main_params.get("master_target", main_params.get("target", 0))))
         sl_val = int(main_params.get("intradaySl", main_params.get("master_stop_loss", main_params.get("sl", 0))))
-        
-        # Trailing SL Logic (Handle both integer and object format from AI)
-        trail_input = main_params.get("trailing_sl", main_params.get("trail_sl", 0))
-        if isinstance(trail_input, dict):
-            trail_val = int(trail_input.get("activation", trail_input.get("increment", 0)))
-        else:
-            try: trail_val = int(trail_input)
-            except: trail_val = 0
 
-        # MUTUALLY EXCLUSIVE RULE: If any leg has TSL, disable master TSL to prevent 400 error
-        if any_leg_has_tsl:
-            trail_val = 0
-            is_master_tsl_enabled = False
+        # ── Master SL Trailing — now read from dedicated object ──────────────
+        # Schema: "master_sl_trailing": {"profit_move": N, "sl_move": N, "no_of_trail_sl": N}
+        msl_trail = main_params.get("master_sl_trailing", {})
+        if isinstance(msl_trail, dict) and msl_trail:
+            profit_move = int(msl_trail.get("profit_move", msl_trail.get("profitMove", 0)))
+            sl_move = int(msl_trail.get("sl_move", msl_trail.get("slMove", 0)))
+            no_of_trail_sl = self._parse_trail_count(msl_trail.get("no_of_trail_sl", msl_trail.get("noOfTrailSl", 0)))
         else:
-            is_master_tsl_enabled = True if trail_val > 0 else False
+            # Legacy: single trailing_sl number treated as both moves
+            trail_input = main_params.get("trailing_sl", main_params.get("trail_sl", 0))
+            if isinstance(trail_input, dict):
+                profit_move = int(trail_input.get("profit_move", trail_input.get("activation", trail_input.get("increment", 0))))
+                sl_move = int(trail_input.get("sl_move", trail_input.get("slMove", profit_move)))
+            else:
+                try:
+                    profit_move = sl_move = int(trail_input)
+                except:
+                    profit_move = sl_move = 0
+            no_of_trail_sl = self._parse_trail_count(main_params.get("no_of_trail_sl", 0))
 
-        # Master Profit Locking Logic
+        is_master_tsl_enabled = (profit_move > 0 or sl_move > 0)
+
+        # ── Master Profit Locking ─────────────────────────────────────────────
         mpl = main_params.get("master_profit_locking", {})
-        
-        # Determine Trading Days (runMon, runTue, etc.)
+        mpl_if_profit = int(mpl.get("if_profit_reaches", mpl.get("ifProfitReaches", 0)))
+        mpl_lock_min  = int(mpl.get("lock_minimum_profit", mpl.get("lockMinimumProfit", 0)))
+        mpl_increase  = int(mpl.get("increse_in_profit_by", mpl.get("increseInProfitBy", 0)))
+        mpl_trail_by  = int(mpl.get("trail_profit_by", mpl.get("trailProfitBy", 0)))
+        # Read noOfTimeTrailTp from both camelCase (LLM schema) and snake_case
+        mpl_no_trail_raw = mpl.get("noOfTimeTrailTp", mpl.get("no_of_time_trail", 0))
+        mpl_no_trail = self._parse_trail_count(mpl_no_trail_raw)
+
+        # ── Trading Days ──────────────────────────────────────────────────────
         trading_days = main_params.get("trading_days", main_params.get("days", main_params.get("runDays", [])))
         if isinstance(trading_days, str):
             trading_days = [d.strip() for d in trading_days.split(",")]
-        
+
         days_map = {
             "runMon": any(d.lower().startswith("mon") for d in trading_days) if trading_days else True,
             "runTue": any(d.lower().startswith("tue") for d in trading_days) if trading_days else True,
             "runWed": any(d.lower().startswith("wed") for d in trading_days) if trading_days else True,
             "runThu": any(d.lower().startswith("thu") for d in trading_days) if trading_days else True,
             "runFri": any(d.lower().startswith("fri") for d in trading_days) if trading_days else True,
+            "runSat": any(d.lower().startswith("sat") for d in trading_days) if trading_days else False,
         }
         is_explicit_days = len(trading_days) > 0
 
+        # ── isIntraday — support trading_type string fallback ─────────────────
+        is_intraday = main_params.get("isIntraday", main_params.get("is_intraday", None))
+        if is_intraday is None:
+            trading_type_str = str(main_params.get("trading_type", main_params.get("tradingType", "intraday"))).lower()
+            is_intraday = "positional" not in trading_type_str
+        else:
+            is_intraday = bool(is_intraday)
+
+        # ── sqroffTime — read from JSON (for pre-expiry sqroff override) ─────
+        sqroff_time = main_params.get("sqroffTime", main_params.get("sqroff_time", "15:15:00"))
+
+        # ── enableTpSlOnPauseStrategy — read from JSON ────────────────────────
+        enable_tp_sl_pause = main_params.get(
+            "enableTpSlOnPauseStrategy",
+            main_params.get("enable_tp_sl_on_pause", main_params.get("tp_sl_on_pause", False))
+        )
+
         payload = {
             "id": "",
-            "strategyName": main_params.get("strategyName", main_params.get("strategy_name", "Aditya")),
+            "strategyName": re.sub(r'_\d{4}$', '', main_params.get("strategyName", main_params.get("strategy_name", "Strategy"))) + f"_{int(__import__('time').time()) % 10000}",
             "underlying": underlying,
             "mainExchange": exchange,
             "mainSegment": segment,
             "mainSymbol": symbol,
-            "isIntraday": main_params.get("isIntraday", main_params.get("is_intraday", True)),
-            "productType": main_params.get("productType", "MIS"),
+            "isIntraday": is_intraday,
+            "productType": main_params.get("productType", "NRML" if not is_intraday else "MIS"),
             "tradingStartTime": main_params.get("tradingStartTime", main_params.get("entry_time", "09:15:00")),
             "tradingEndTime": main_params.get("tradingEndTime", main_params.get("exit_time", "15:15:00")),
             "isRangeBreakOut": main_params.get("isRangeBreakOut", main_params.get("is_range_breakout", False)),
             "rangeEndTime": main_params.get("rangeEndTime", main_params.get("range_end_time", "09:20:00")),
             "isBtstStbt": main_params.get("isBtstStbt", main_params.get("is_btst_stbt", False)),
             "btstGapDays": int(main_params.get("btstGapDays", main_params.get("btst_gap_days", 1))),
-            "isCombinedPremEntry": True if int(main_params.get("total_combined_premium", main_params.get("total_combined_premium", main_params.get("total_combined_prem", 0)))) > 0 else (main_params.get("is_combined_premium_entry", main_params.get("is_combined_prem_entry", False))),
+            "isCombinedPremEntry": (
+                True if int(main_params.get("total_combined_premium", main_params.get("total_combined_prem", 0))) > 0
+                else main_params.get("is_combined_premium_entry", main_params.get("is_combined_prem_entry", False))
+            ),
             "totalCombinedPremium": int(main_params.get("total_combined_premium", main_params.get("total_combined_prem", 0))),
-            
-            # Master Target Logic
+
+            # Master Target
             "isEnableMasterTarget": True if target_val > 0 else False,
-            "targetBy": main_params.get("target_by", "Combined Profit"),
+            "targetBy": main_params.get("target_by", main_params.get("targetBy", "Combined Profit")),
             "intradayTarget": target_val,
-            "isEnableActionOnTarget": False,
-            "actionOnTarget": "Reexecute",
-            
-            # Master Profit Locking Logic (Strategy Level)
-            "isEnableProfitLockingTrailing": True if int(mpl.get("if_profit_reaches", 0)) > 0 else False,
-            "ifProfitReaches": int(mpl.get("if_profit_reaches", 0)),
-            "lockMinimumProfit": int(mpl.get("lock_minimum_profit", 0)),
-            "increseInProfitBy": int(mpl.get("increse_in_profit_by", 0)),
-            "trailProfitBy": int(mpl.get("trail_profit_by", 0)),
-            "noOfTimeTrailTp": int(mpl.get("no_of_time_trail", 0)),
+            "isEnableActionOnTarget": main_params.get("isEnableActionOnTarget", main_params.get("enable_action_on_target", int(main_params.get("reexecute_on_target_count", -1)) >= 0)),
+            "actionOnTarget": main_params.get("actionOnTarget", main_params.get("action_on_master_target", "Reexecute")),
+
+            # Master Profit Locking
+            "isEnableProfitLockingTrailing": True if mpl_if_profit > 0 else False,
+            "ifProfitReaches": mpl_if_profit,
+            "lockMinimumProfit": mpl_lock_min,
+            "increseInProfitBy": mpl_increase,
+            "trailProfitBy": mpl_trail_by,
+            "noOfTimeTrailTp": mpl_no_trail,
             "noOfIntradayCycle": int(main_params.get("reexecute_on_target_count", 0)),
             "intradayCycleDelay": int(main_params.get("reexecute_on_target_delay", 0)),
-            
-            # Master SL Logic
+
+            # Master SL
             "isEnableMasterSl": True if sl_val > 0 else False,
-            "slBy": main_params.get("sl_by", "Combined Loss"),
+            "slBy": main_params.get("sl_by", main_params.get("slBy", "Combined Loss")),
             "intradaySl": sl_val,
-            "isEnableActionOnMasterSl": False,
-            "actionOnSl": "Reexecute",
-            
-            # Master SL Trailing Logic (Strategy Level)
+            "isEnableActionOnMasterSl": main_params.get("isEnableActionOnMasterSl", main_params.get("enable_action_on_master_sl", int(main_params.get("reexecute_on_sl_count", -1)) >= 0)),
+            "actionOnSl": main_params.get("actionOnSl", main_params.get("action_on_master_sl", "Reexecute")),
+
+            # Master SL Trailing
             "isEnableStoplossTrailing": is_master_tsl_enabled,
-            "profitMove": trail_val,
-            "slMove": trail_val,
-            "noOfTrailSl": self._parse_trail_count(main_params.get("no_of_trail_sl", 0)),
-            
+            "profitMove": profit_move,
+            "slMove": sl_move,
+            "noOfTrailSl": no_of_trail_sl if is_master_tsl_enabled else 0,
+
             "noOfReexecuteOnSl": int(main_params.get("reexecute_on_sl_count", 0)),
             "reexecuteDelayOnSl": int(main_params.get("reexecute_on_sl_delay", 0)),
             "isEnableSqroffBeforeExpiryDays": main_params.get("isEnableSqroffBeforeExpiryDays", main_params.get("sqroff_before_expiry", False)),
             "sqroffBeforeExpiryDays": int(main_params.get("sqroffBeforeExpiryDays", main_params.get("sqroff_before_expiry_days", 0))),
-            "sqroffTime": "15:15:00",
-            
-            # Advanced / Checkbox Parameters
+            "sqroffTime": sqroff_time,
+
+            # Working Days
             "isEnableWorkingDays": is_explicit_days,
             "runMon": days_map["runMon"],
             "runTue": days_map["runTue"],
             "runWed": days_map["runWed"],
             "runThu": days_map["runThu"],
             "runFri": days_map["runFri"],
-            "runSat": False,
+            "runSat": days_map["runSat"],
             "runSun": False,
+
+            # VIX
             "enableVixFilter": main_params.get("enableVixFilter", main_params.get("vix_filter", False)),
             "vixStartValue": int(main_params.get("vixStartValue", main_params.get("vix_start_value", 1))),
             "vixEndValue": int(main_params.get("vixEndValue", main_params.get("vix_end_value", 5))),
-            "enableTpSlOnPauseStrategy": False,
+
+            # Safety flags
+            "enableTpSlOnPauseStrategy": enable_tp_sl_pause,
             "sqroffAllLegs": main_params.get("sqroffAllLegs", main_params.get("sqroff_all_legs", main_params.get("squareOffAllLegs", False))),
             "pauseAndSqroffTradingOnMarginExeed": main_params.get("pauseAndSqroffTradingOnMarginExeed", main_params.get("sqroff_on_rejection", main_params.get("sqroffPositionOnRejection", False))),
             "requiredMargin": self._parse_margin(main_params.get("requiredMargin", main_params.get("required_margin", 1))),
+
             "shortDescription": main_params.get("shortDescription", ""),
             "detailedDescription": main_params.get("detailedDescription", ""),
             "strategyTypeId": self.strategy_type_id,
@@ -152,7 +187,6 @@ class PayloadGenerator:
         }
 
         return payload
-
 
     def _generate_leg_payload(self, leg, default_exchange, symbol):
         strike_type_map = {
@@ -165,129 +199,150 @@ class PayloadGenerator:
             "THETA_RANGE": "Strike By Theta Range",
             "NEAREST_THETA": "Strike By Nearest Theta",
             "STRIKE BY ATM VALUE": "Strike By ATM Value",
-            "STRIKE BY ATM %": "Strike By ATM %"
+            "STRIKE BY ATM %": "Strike By ATM %",
         }
-        
-        # Robust ATM Type Mapping - Ensure we always get the full string
+
         raw_atm = str(leg.get("atmType", leg.get("strike_type", "ATM"))).upper()
         if "STRIKE BY" in raw_atm:
-             # Already a full string, just ensure correct case
-             atm_type = raw_atm.title().replace("Atm", "ATM")
+            atm_type = raw_atm.title().replace("Atm", "ATM")
         else:
-             atm_type = strike_type_map.get(raw_atm, "Strike By ATM Value")
-        
+            atm_type = strike_type_map.get(raw_atm, "Strike By ATM Value")
+
         # Ranges
         s_range = int(float(leg.get("premium_start_range", leg.get("premiumStartRange", 10))))
         e_range = int(float(leg.get("premium_end_range", leg.get("premiumEndRange", 20))))
-        
-        # Strike/ATM value
+
+        # Strike/ATM value — keep as float for Delta, Theta, AND ATM%
         atm_val = leg.get("strike", leg.get("atm", 0))
         if isinstance(atm_val, str):
-            # Extract number including decimals
             nums = re.findall(r"[-+]?\d*\.?\d+", atm_val)
             atm_val = float(nums[0]) if nums else 0.0
         else:
             atm_val = float(atm_val)
 
-        # Smart Casting: Only keep as float if it's Delta or Theta related
-        if "Delta" not in atm_type and "Theta" not in atm_type:
+        # Cast to int only for pure ATM Value types (not ATM%, Delta, Theta)
+        needs_float = any(k in atm_type for k in ("Delta", "Theta", "ATM %"))
+        if not needs_float:
             atm_val = int(atm_val)
 
-        # Target/SL
-        t_val = int(float(leg.get("target", 0)))
-        s_val = int(float(leg.get("sl", 0)))
-        
-        # Profit Locking logic
+        # Target / SL — API always requires integer (even for Delta/Theta types)
+        raw_t_by = str(leg.get("targetBy", leg.get("target_by", "Target by Money")))
+        raw_s_by = str(leg.get("slBy", leg.get("sl_by", "SL by Money")))
+        t_raw = float(leg.get("target", 0))
+        s_raw = float(leg.get("sl", 0))
+        t_val = max(1, math.ceil(t_raw)) if t_raw > 0 else 0
+        s_val = max(1, math.ceil(s_raw)) if s_raw > 0 else 0
+
+        # Profit locking
         pl = leg.get("profit_locking", leg.get("profitLocking", {}))
 
-        # Trailing SL logic
+        # SL trailing
         tsl = leg.get("trail_sl", leg.get("trailSl", {}))
+        tsl_market_move = int(tsl.get("trail_sl_market_move", leg.get("trail_sl_market_move", leg.get("trailSlMarketMove", 0))))
+        tsl_move        = int(tsl.get("trail_sl_move", leg.get("trail_sl_move", leg.get("trailSlMove", 0))))
+        has_tsl = tsl_market_move > 0 or tsl_move > 0
 
-        # Leg Trailing Robust Mapping: Look for values in both nested and top-level to prevent data loss
-        has_tsl = True if (int(tsl.get("trail_sl_market_move", leg.get("trail_sl_market_move", leg.get("trailSlMarketMove", 0)))) > 0 or 
-                          int(tsl.get("trail_sl_move", leg.get("trail_sl_move", leg.get("trailSlMove", 0)))) > 0) else False
-
-        # Leg Profit Locking Robust Mapping: Quadruple-redundant search
-        # Leg Profit Locking Robust Mapping
-        raw_no_trail_tp = leg.get("noOfTimeTrailTp", 
-                          leg.get("no_of_time_trail", 
-                          pl.get("no_of_time_trail", 
-                          pl.get("noOfTimeTrailTp", 0))))
-        no_trail_tp = self._parse_trail_count(raw_no_trail_tp)
-
-        # Leg Trailing SL mapping
-        raw_trail_sl = self._parse_trail_count(leg.get("noOfTimeTrailSl", tsl.get("no_of_time_trail", leg.get("no_of_time_trail", 0))))
+        # SL trail count
+        raw_trail_sl = self._parse_trail_count(
+            tsl.get("no_of_time_trail", leg.get("noOfTimeTrailSl", leg.get("no_of_time_trail", 0)))
+        )
         if not has_tsl:
             raw_trail_sl = 0
 
+        # Profit locking trail count
+        raw_no_trail_tp = pl.get("no_of_time_trail", pl.get("noOfTimeTrailTp",
+                          leg.get("noOfTimeTrailTp", leg.get("no_of_time_trail", 0))))
+        no_trail_tp = self._parse_trail_count(raw_no_trail_tp)
+
+        # ── isEnableActionOnTarget — auto-enable when leg_no > 0 or Reenter ──
+        action_on_target    = leg.get("actionOnTarget", leg.get("action_on_target", "Execute Leg"))
+        target_action_leg   = int(leg.get("actionOnTargetLegNo", leg.get("target_action_leg_no", leg.get("action_on_target_leg_no", 0))))
+        target_action_delay = int(leg.get("actionOnTargetDelay", leg.get("target_action_delay", leg.get("action_on_target_delay", 0))))
+        is_enable_aot = leg.get("isEnableActionOnTarget", leg.get("is_enable_action_on_target", False))
+        if target_action_leg > 0 or action_on_target == "Reenter Leg":
+            is_enable_aot = True
+
+        # ── isEnableActionOnSl — auto-enable when leg_no > 0 or Reenter ──────
+        action_on_sl    = leg.get("actionOnSl", leg.get("action_on_sl", "Execute Leg"))
+        sl_action_leg   = int(leg.get("actionOnSlLegNo", leg.get("sl_action_leg_no", leg.get("action_on_sl_leg_no", 0))))
+        sl_action_delay = int(leg.get("actionOnSlDelay", leg.get("sl_action_delay", leg.get("action_on_sl_delay", 0))))
+        is_enable_aosl = leg.get("isEnableActionOnSl", leg.get("is_enable_action_on_sl", False))
+        if sl_action_leg > 0 or action_on_sl == "Reenter Leg":
+            is_enable_aosl = True
+
+        # ── isWaitAndTrade — auto-enable when waitValue > 0 ──────────────────
+        wait_and_trade = leg.get("isWaitAndTrade", leg.get("wait_and_trade", leg.get("is_wait_and_trade", False)))
+        wait_for  = self._map_wait_direction(leg.get("waitFor", leg.get("wait_for", "Up %")))
+        wait_value_raw = float(leg.get("waitValue", leg.get("wait_value", 0)))
+        wait_value = math.ceil(wait_value_raw)   # round up so 0.5% → 1
+        if wait_value > 0 and not wait_and_trade:
+            wait_and_trade = True
+        if wait_and_trade and wait_value == 0:
+            wait_value = 1   # API rejects 0 when isWaitAndTrade=True
+
+        leg_seg_raw = str(leg.get("segment", "OPT"))
+        leg_segment = leg_seg_raw.upper() if leg_seg_raw.upper() != "STOCK" else "Stock"
 
         return {
             "id": "",
-            "isIdle": leg.get("is_idle", False),
+            "isIdle": leg.get("isIdle", leg.get("is_idle", False)),
             "tradeSide": str(leg.get("tradeSide", leg.get("action", "BUY"))).upper(),
             "lot": int(leg.get("lot", leg.get("lots", 1))),
-            "segment": str(leg.get("segment", "OPT")).upper(),
+            "segment": leg_segment,
             "expiry": self._resolve_expiry(leg.get("expiry", leg.get("expiry_bucket")), symbol),
-            "optionType": str(leg.get("optionType", leg.get("option", "CE"))).upper(),
+            "optionType": (lambda v: v if v not in ("", "NONE", "NULL", "N/A", "FUT") else "CE")(str(leg.get("optionType", leg.get("option", "CE"))).upper()),
             "atmType": atm_type,
-            "premiumStartRange": int(float(leg.get("premiumStartRange", leg.get("premium_start_range", 10)))),
-            "premiumEndRange": int(float(leg.get("premiumEndRange", leg.get("premium_end_range", 20)))),
-            "strikeDirection": self._map_strike_direction(leg.get("strikeDirection", leg.get("strike_direction", "BOTH"))),
+            "premiumStartRange": s_range,
+            "premiumEndRange": e_range,
+            "strikeDirection": self._map_strike_direction(leg.get("strikeDirection", leg.get("direction", leg.get("strike_direction", "BOTH")))),
             "atm": atm_val,
-            "strikeCondition": self._map_condition(leg.get("strikeCondition", leg.get("strike_condition", "Any"))),
-            "isEnableLegTarget": True if t_val > 0 else False,
+            "strikeCondition": self._map_condition(leg.get("strikeCondition", leg.get("condition", leg.get("strike_condition", "Any")))),
+            "isEnableLegTarget": True if (t_val > 0 or "Range" in raw_t_by) else False,
             "targetBy": self._map_target_by(leg.get("targetBy", leg.get("target_by", "Target by Money")), "Target"),
             "target": t_val,
-            "isEnableActionOnTarget": leg.get("isEnableActionOnTarget", leg.get("is_enable_action_on_target", False)),
-            "actionOnTarget": leg.get("actionOnTarget", leg.get("action_on_target", "Execute Leg")),
-            "actionOnTargetLegNo": int(leg.get("actionOnTargetLegNo", leg.get("action_on_target_leg_no", 0))),
-            "actionOnTargetDelay": int(leg.get("actionOnTargetDelay", leg.get("action_on_target_delay", 0))),
-            "isProfitLockingAndTrailing": True if (int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))) > 0) else False,
+            "isEnableActionOnTarget": is_enable_aot,
+            "actionOnTarget": action_on_target,
+            "actionOnTargetLegNo": target_action_leg,
+            "actionOnTargetDelay": target_action_delay,
+            "isProfitLockingAndTrailing": True if int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))) > 0 else False,
             "ifProfitReaches": int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))),
             "lockMinimumProfit": int(pl.get("lock_minimum_profit", pl.get("lockMinimumProfit", leg.get("lock_minimum_profit", 0)))),
             "increseInProfitBy": int(pl.get("increse_in_profit_by", pl.get("increseInProfitBy", leg.get("increse_in_profit_by", 0)))),
             "trailProfitBy": int(pl.get("trail_profit_by", pl.get("trailProfitBy", leg.get("trail_profit_by", 0)))),
             "noOfTimeTrailTp": no_trail_tp,
-            "isEnableLegStoploss": True if (s_val > 0 or leg.get("isEnableLegStoploss", leg.get("is_enable_leg_stoploss", False))) else False,
+            "isEnableLegStoploss": True if (s_val > 0 or "Range" in raw_s_by or leg.get("isEnableLegStoploss", leg.get("is_enable_leg_stoploss", False))) else False,
             "slBy": self._map_target_by(leg.get("slBy", leg.get("sl_by", "SL by Money")), "SL"),
             "sl": s_val,
-            "isEnableActionOnSl": leg.get("isEnableActionOnSl", leg.get("is_enable_action_on_sl", False)),
-            "actionOnSl": leg.get("actionOnSl", leg.get("action_on_sl", "Execute Leg")),
-            "actionOnSlLegNo": int(leg.get("actionOnSlLegNo", leg.get("action_on_sl_leg_no", 0))),
-            "actionOnSlDelay": int(leg.get("actionOnSlDelay", leg.get("action_on_sl_delay", 0))),
+            "isEnableActionOnSl": is_enable_aosl,
+            "actionOnSl": action_on_sl,
+            "actionOnSlLegNo": sl_action_leg,
+            "actionOnSlDelay": sl_action_delay,
             "isEnableStoplossTrailing": has_tsl,
-            "trailSlMarketMove": int(tsl.get("trail_sl_market_move", leg.get("trail_sl_market_move", leg.get("trailSlMarketMove", 0)))) if has_tsl else 0,
-            "trailSlMove": int(tsl.get("trail_sl_move", leg.get("trail_sl_move", leg.get("trailSlMove", 0)))) if has_tsl else 0,
+            "trailSlMarketMove": tsl_market_move if has_tsl else 0,
+            "trailSlMove": tsl_move if has_tsl else 0,
             "noOfTimeTrailSl": raw_trail_sl,
-            "no_of_time_trail_sl": raw_trail_sl, # Redundant underscored field for some API versions
-            "isWaitAndTrade": leg.get("isWaitAndTrade", leg.get("is_wait_and_trade", False)),
-            "waitFor": leg.get("waitFor", leg.get("wait_for", "Up %")),
-            "waitValue": int(float(leg.get("waitValue", leg.get("wait_value", 0)))),
+            "isWaitAndTrade": wait_and_trade,
+            "waitFor": wait_for,
+            "waitValue": wait_value,
             "isExecuteOnRangeBreakout": leg.get("isExecuteOnRangeBreakout", leg.get("is_execute_on_range_breakout", False)),
             "executeOnRangeBreakout": leg.get("executeOnRangeBreakout", leg.get("execute_on_range_breakout", "Range High Break"))
         }
 
     def _parse_margin(self, value):
-        """
-        Cleans and parses margin strings (e.g., '~1.5L', '200k') into integers.
-        """
         if isinstance(value, (int, float)):
             return int(value)
-        
         try:
-            # Remove common non-numeric characters
             s = str(value).lower().replace("~", "").replace(",", "").replace(" ", "").replace("approx", "")
-            
-            # Handle 'L' (Lakh) or 'k' (Thousand)
             multiplier = 1
-            if 'l' in s:
+            if 'cr' in s:
+                multiplier = 10000000
+                s = s.replace('cr', '')
+            elif 'l' in s:
                 multiplier = 100000
                 s = s.replace('l', '')
             elif 'k' in s:
                 multiplier = 1000
                 s = s.replace('k', '')
-            
-            # Extract only the numeric part (including decimal)
             numeric_part = re.findall(r"[-+]?\d*\.\d+|\d+", s)
             if numeric_part:
                 return int(float(numeric_part[0]) * multiplier)
@@ -296,19 +351,12 @@ class PayloadGenerator:
             return 1
 
     def _parse_trail_count(self, value):
-        """
-        Parses trail count values. Maps 'unlimited' strings and AI proxies (0, 99, 999) to 9999 
-        because Market Maya V3 API rejects a count of 0 when trailing is enabled.
-        """
         if isinstance(value, str):
-            if value.lower() == "unlimited":
+            if value.lower() in ("unlimited", "infinite"):
                 return 9999
         try:
             val = int(value)
-            # If the value is 99 or above, it's usually an AI proxy for unlimited. 
-            # If the value is 0, the API will reject it if trailing is enabled.
-            # Map both to 9999.
-            if val >= 99 or val == 0:
+            if val == 0:
                 return 9999
             return val
         except:
@@ -316,78 +364,69 @@ class PayloadGenerator:
 
     def _resolve_expiry(self, expiry, symbol):
         """
-        Forces Current Week for Indices if the value is default or missing.
+        Only apply the Current Week default when expiry is genuinely absent.
+        An explicitly set "Current Month" must be respected.
         """
-        expiry = str(expiry) if expiry else "Current Month"
-        symbol = str(symbol).upper()
-        
-        # If it's an index and we are at the default 'Current Month', upgrade to 'Current Week'
-        if ("NIFTY" in symbol or "BANKNIFTY" in symbol) and expiry == "Current Month":
-            return "Current Week"
-            
-        return expiry
-
-    def _map_target_type(self, value, category):
-        """
-        Maps shorthand like 'Point' to 'Target by Point' or 'SL by Point'.
-        """
-        value = str(value)
-        # If it's already a full string, return it
-        if "by" in value.lower():
-            return value
-            
-        mapping = {
-            "POINT": f"{category} by Point",
-            "MONEY": f"{category} by Money",
-            "PERCENTAGE": f"{category} by Percentage",
-            "PERCENT": f"{category} by Percentage",
-            "DELTA": f"{category} by Delta",
-            "THETA": f"{category} by Theta"
-        }
-        
-        return mapping.get(value.upper(), f"{category} by Money")
+        if not expiry or str(expiry).lower() in ("none", "null", ""):
+            symbol = str(symbol).upper()
+            if "NIFTY" in symbol or "SENSEX" in symbol or "BANKEX" in symbol:
+                return "Current Week"
+            return "Current Month"
+        return str(expiry)
 
     def _map_condition(self, value):
-        """
-        Maps shorthand like 'AboveEqual' to 'AboveEqual (>=)'.
-        """
         val = str(value)
         if "(" in val:
             return val
-            
         mapping = {
             "ABOVEEQUAL": "AboveEqual (>=)",
+            "ABOVE_EQUAL": "AboveEqual (>=)",
+            "ABOVE EQUAL": "AboveEqual (>=)",
+            ">=": "AboveEqual (>=)",
             "BELOWEQUAL": "BelowEqual (<=)",
-            "ANY": "Any"
+            "BELOW_EQUAL": "BelowEqual (<=)",
+            "BELOW EQUAL": "BelowEqual (<=)",
+            "<=": "BelowEqual (<=)",
+            "ANY": "Any",
         }
         return mapping.get(val.upper(), "Any")
 
     def _map_strike_direction(self, value):
-        """
-        Maps direction to uppercase BOTH/ITM/OTM.
-        """
         val = str(value).upper()
-        if val in ["BOTH", "ITM", "OTM"]:
+        if val in ("BOTH", "ITM", "OTM"):
             return val
         return "BOTH"
 
     def _map_target_by(self, value, category):
-        """
-        Maps shorthand like 'Money' to 'Target by Money' or 'SL by Money'.
-        """
         val = str(value)
         if "by" in val.lower():
             return val
-            
         mapping = {
             "MONEY": f"{category} by Money",
             "POINT": f"{category} by Point",
-            "PERCENTAGE": f"{category} by Percentage",
-            "PERCENT": f"{category} by Percentage",
+            "POINT%": f"{category} by Point%",
+            "POINT (%)": f"{category} by Point%",
+            "PERCENTAGE": f"{category} by Point%",
+            "PERCENT": f"{category} by Point%",
             "DELTA": f"{category} by Delta",
-            "THETA": f"{category} by Theta"
+            "DELTA%": f"{category} by Delta%",
+            "DELTA (%)": f"{category} by Delta%",
+            "THETA": f"{category} by Theta",
+            "THETA%": f"{category} by Theta%",
+            "THETA (%)": f"{category} by Theta%",
+            "RANGE": f"{category} by Range High/Low",
         }
         return mapping.get(val.upper(), f"{category} by Money")
+
+    def _map_wait_direction(self, value):
+        val = str(value).strip().lower()
+        mapping = {
+            "up %": "Up %", "up%": "Up %", "up_percent": "Up %", "up percent": "Up %",
+            "down %": "Down %", "down%": "Down %", "down_percent": "Down %", "down percent": "Down %",
+            "up pts": "Up pts", "up points": "Up pts", "upward points": "Up pts", "up_pts": "Up pts",
+            "down pts": "Down pts", "down points": "Down pts", "downward points": "Down pts", "down_pts": "Down pts",
+        }
+        return mapping.get(val, value)
 
 # Singleton instance
 generator = PayloadGenerator()
