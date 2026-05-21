@@ -398,23 +398,31 @@ class PayloadGenerator:
         return "BOTH"
 
     def _map_target_by(self, value, category):
-        val = str(value)
-        if "by" in val.lower():
-            return val
+        val = str(value).strip()
+        # Strip prefix ("Target by " / "SL by ") to normalize to just the type keyword
+        lower = val.lower()
+        for prefix in ("target by ", "sl by "):
+            if lower.startswith(prefix):
+                val = val[len(prefix):]
+                break
         mapping = {
             "MONEY": f"{category} by Money",
             "POINT": f"{category} by Point",
-            "POINT%": f"{category} by Point%",
-            "POINT (%)": f"{category} by Point%",
-            "PERCENTAGE": f"{category} by Point%",
-            "PERCENT": f"{category} by Point%",
+            "POINT%": f"{category} by Point (%)",
+            "POINT (%)": f"{category} by Point (%)",
+            "POINT(%)": f"{category} by Point (%)",
+            "PERCENTAGE": f"{category} by Point (%)",
+            "PERCENT": f"{category} by Point (%)",
             "DELTA": f"{category} by Delta",
-            "DELTA%": f"{category} by Delta%",
-            "DELTA (%)": f"{category} by Delta%",
+            "DELTA%": f"{category} by Delta (%)",
+            "DELTA (%)": f"{category} by Delta (%)",
+            "DELTA(%)": f"{category} by Delta (%)",
             "THETA": f"{category} by Theta",
-            "THETA%": f"{category} by Theta%",
-            "THETA (%)": f"{category} by Theta%",
+            "THETA%": f"{category} by Theta (%)",
+            "THETA (%)": f"{category} by Theta (%)",
+            "THETA(%)": f"{category} by Theta (%)",
             "RANGE": f"{category} by Range High/Low",
+            "RANGE HIGH/LOW": f"{category} by Range High/Low",
         }
         return mapping.get(val.upper(), f"{category} by Money")
 

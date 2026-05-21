@@ -43,9 +43,11 @@ STRICT TWO-STEP WORKFLOW:
    - **TARGET BY / SL BY — MANDATORY**: Use EXACT strings for all types:
       * Money: `"Target by Money"` / `"SL by Money"`
       * Point: `"Target by Point"` / `"SL by Point"`
-      * Point%: `"Target by Point%"` / `"SL by Point%"`
+      * Point%: `"Target by Point (%)"` / `"SL by Point (%)"`
       * Delta: `"Target by Delta"` / `"SL by Delta"`
+      * Delta%: `"Target by Delta (%)"` / `"SL by Delta (%)"`
       * Theta: `"Target by Theta"` / `"SL by Theta"`
+      * Theta%: `"Target by Theta (%)"` / `"SL by Theta (%)"`
       * Range: `"Target by Range High/Low"` / `"SL by Range High/Low"`
    - **ATM% STRIKE VALUE**: When `strike_type` = `"ATM%"`, set `"strike"` to the float value (e.g., 0.50 for "ATM% 0.50"). Do NOT set it to 0.
    - **MASTER TARGET BY — MANDATORY**:
@@ -175,9 +177,9 @@ STRICT JSON SCHEMA:
                 "direction": "BOTH / ITM / OTM",
                 "condition": "Any / AboveEqual / BelowEqual",
                 "target": <number>,
-                "target_by": "Target by Money / Target by Point / Target by Point% / Target by Delta / Target by Theta / Target by Range High/Low",
+                "target_by": "Target by Money / Target by Point / Target by Point (%) / Target by Delta / Target by Delta (%) / Target by Theta / Target by Theta (%) / Target by Range High/Low",
                 "sl": <number>,
-                "sl_by": "SL by Money / SL by Point / SL by Point% / SL by Delta / SL by Theta / SL by Range High/Low",
+                "sl_by": "SL by Money / SL by Point / SL by Point (%) / SL by Delta / SL by Delta (%) / SL by Theta / SL by Theta (%) / SL by Range High/Low",
                 "wait_and_trade": <boolean>,
                 "wait_for": "Up % / Down % / Up pts / Down pts",
                 "wait_value": <number>,
