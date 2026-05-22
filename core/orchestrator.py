@@ -50,6 +50,8 @@ STRICT TWO-STEP WORKFLOW:
       * Theta%: `"Target by Theta (%)"` / `"SL by Theta (%)"`
       * Range: `"Target by Range High/Low"` / `"SL by Range High/Low"`
    - **ATM% STRIKE VALUE**: When `strike_type` = `"ATM%"`, set `"strike"` to the float value (e.g., 0.50 for "ATM% 0.50"). Do NOT set it to 0.
+   - **NEAREST PREMIUM VALUE — MANDATORY**: When `strike_type` = `"NEAREST_PREMIUM"`, put the premium amount in `"premium_start_range"` (e.g., "nearest premium 200" → `"premium_start_range": 200`). Set `"strike": 0`. NEVER put the premium amount in `"strike"` for this type.
+   - **PREMIUM RANGE VALUE — MANDATORY**: When `strike_type` = `"PREMIUM_RANGE"`, put start in `"premium_start_range"` and end in `"premium_end_range"` (e.g., "premium 100 to 150" → `"premium_start_range": 100, "premium_end_range": 150`). Set `"strike": 0`.
    - **MASTER TARGET BY — MANDATORY**:
       * "combined profit" / "profit" → `"target_by": "Combined Profit"`
       * "combined premium" / "premium" → `"target_by": "Combined Premium"`
@@ -102,6 +104,7 @@ STRICT TWO-STEP WORKFLOW:
       * Default when direction not stated → `"Range High Break"`
       * Both `"is_execute_on_range_breakout": true` and `"execute_on_range_breakout"` MUST be set together on the leg.
    - **WORKING DAYS — MANDATORY**: Valid days are Mon, Tue, Wed, Thu, Fri, Sat. Saturday is a valid trading day for some exchanges. Include "Sat" in `trading_days` only when user explicitly requests Saturday.
+      * **CRITICAL**: OMIT the `"trading_days"` field entirely when the user does NOT explicitly mention specific trading days. NEVER generate `"trading_days": ["Mon","Tue","Wed","Thu","Fri"]` as a default — omitting it is correct and means "trade every day". Only include it when the user says "only on Monday and Wednesday" or similar explicit day restrictions.
    - **MASTER TARGET / SL ACTION — MANDATORY**: The `action_on_master_target` and `action_on_master_sl` fields always use `"Reexecute"` (only allowed value). When user specifies reexecution on master target/SL, set both the count and delay fields along with the action field.
    - **BOOLEAN FLAGS ARE INDEPENDENT**: `sqroff_all_legs`, `sqroff_on_rejection`, `enable_tp_sl_on_pause` are each independent boolean flags. When the user explicitly enables any of these, you MUST set it to `true` in the JSON. NEVER drop a boolean flag just because the prompt is complex or many other fields are also being set.
    - DO NOT call `create_and_deploy_strategy` yet. Ask: "Shall I proceed?"
@@ -169,9 +172,9 @@ STRICT JSON SCHEMA:
                 "segment": "OPT / FUT / Stock",
                 "option": "CE / PE",
                 "strike_type": "ATM / ATM% / PREMIUM_RANGE / NEAREST_PREMIUM / DELTA_RANGE / NEAREST_DELTA / THETA_RANGE / NEAREST_THETA",
-                "strike": "<number — ATM offset OR float for ATM%/Delta/Theta>",
-                "premium_start_range": <number>,
-                "premium_end_range": <number>,
+                "strike": "<number — ATM offset for ATM type; float for ATM%/Delta/Theta; set 0 for NEAREST_PREMIUM>",
+                "premium_start_range": "<number — start of range for PREMIUM_RANGE; the single premium amount for NEAREST_PREMIUM>",
+                "premium_end_range": "<number — end of range for PREMIUM_RANGE only>",
                 "lots": <number>,
                 "expiry": "Current Week / Week 1 / Week 2 / Current Month / Month 1 / Month 2",
                 "direction": "BOTH / ITM / OTM",

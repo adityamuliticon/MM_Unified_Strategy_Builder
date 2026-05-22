@@ -134,7 +134,7 @@ class PayloadGenerator:
             "lockMinimumProfit": mpl_lock_min,
             "increseInProfitBy": mpl_increase,
             "trailProfitBy": mpl_trail_by,
-            "noOfTimeTrailTp": mpl_no_trail,
+            "noOfTimeTrailTp": mpl_no_trail if mpl_if_profit > 0 else 0,
             "noOfIntradayCycle": int(main_params.get("reexecute_on_target_count", 0)),
             "intradayCycleDelay": int(main_params.get("reexecute_on_target_delay", 0)),
 
@@ -225,6 +225,12 @@ class PayloadGenerator:
         if not needs_float:
             atm_val = int(atm_val)
 
+        # For Nearest Premium: the single premium amount belongs in premiumStartRange,
+        # not atm. LLM typically puts it in "strike" → atm_val. Reroute it.
+        if atm_type == "Strike By Nearest Premium" and atm_val != 0:
+            s_range = int(atm_val)
+            atm_val = 0
+
         # Target / SL — API always requires integer (even for Delta/Theta types)
         raw_t_by = str(leg.get("targetBy", leg.get("target_by", "Target by Money")))
         raw_s_by = str(leg.get("slBy", leg.get("sl_by", "SL by Money")))
@@ -302,21 +308,21 @@ class PayloadGenerator:
             "target": t_val,
             "isEnableActionOnTarget": is_enable_aot,
             "actionOnTarget": action_on_target,
-            "actionOnTargetLegNo": target_action_leg,
-            "actionOnTargetDelay": target_action_delay,
+            "actionOnTargetLegNo": target_action_delay,  # MM API: legNo field stores delay
+            "actionOnTargetDelay": target_action_leg,    # MM API: delay field stores leg no
             "isProfitLockingAndTrailing": True if int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))) > 0 else False,
             "ifProfitReaches": int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))),
             "lockMinimumProfit": int(pl.get("lock_minimum_profit", pl.get("lockMinimumProfit", leg.get("lock_minimum_profit", 0)))),
             "increseInProfitBy": int(pl.get("increse_in_profit_by", pl.get("increseInProfitBy", leg.get("increse_in_profit_by", 0)))),
             "trailProfitBy": int(pl.get("trail_profit_by", pl.get("trailProfitBy", leg.get("trail_profit_by", 0)))),
-            "noOfTimeTrailTp": no_trail_tp,
+            "noOfTimeTrailTp": no_trail_tp if int(pl.get("if_profit_reaches", pl.get("ifProfitReaches", leg.get("if_profit_reaches", 0)))) > 0 else 0,
             "isEnableLegStoploss": True if (s_val > 0 or "Range" in raw_s_by or leg.get("isEnableLegStoploss", leg.get("is_enable_leg_stoploss", False))) else False,
             "slBy": self._map_target_by(leg.get("slBy", leg.get("sl_by", "SL by Money")), "SL"),
             "sl": s_val,
             "isEnableActionOnSl": is_enable_aosl,
             "actionOnSl": action_on_sl,
-            "actionOnSlLegNo": sl_action_leg,
-            "actionOnSlDelay": sl_action_delay,
+            "actionOnSlLegNo": sl_action_delay,  # MM API: legNo field stores delay
+            "actionOnSlDelay": sl_action_leg,    # MM API: delay field stores leg no
             "isEnableStoplossTrailing": has_tsl,
             "trailSlMarketMove": tsl_market_move if has_tsl else 0,
             "trailSlMove": tsl_move if has_tsl else 0,

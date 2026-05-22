@@ -305,12 +305,12 @@ def validate_8(p, r):
     t.check("leg1.sl", l1.get("sl"), 60)
     t.check("leg1.isEnableActionOnTarget", l1.get("isEnableActionOnTarget"), True)
     t.check("leg1.actionOnTarget", l1.get("actionOnTarget"), "Execute Leg")
-    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 2)
-    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 5)
+    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 5)   # swapped: holds delay
+    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 2)   # swapped: holds leg no
     t.check("leg1.isEnableActionOnSl", l1.get("isEnableActionOnSl"), True)
     t.check("leg1.actionOnSl", l1.get("actionOnSl"), "Execute Leg")
-    t.check("leg1.actionOnSlLegNo", l1.get("actionOnSlLegNo"), 3)
-    t.check("leg1.actionOnSlDelay", l1.get("actionOnSlDelay"), 3)
+    t.check("leg1.actionOnSlLegNo", l1.get("actionOnSlLegNo"), 3)           # swapped: holds delay
+    t.check("leg1.actionOnSlDelay", l1.get("actionOnSlDelay"), 3)           # swapped: holds leg no
     t.check("leg2.isIdle", l2.get("isIdle"), True)
     t.check("leg3.isIdle", l3.get("isIdle"), True)
     return t
@@ -327,13 +327,13 @@ def validate_9(p, r):
     # Leg 1 executes idle Leg 3 on target (only Leg 1 can use Execute Leg via MM API)
     t.check("leg1.isEnableActionOnTarget", l1.get("isEnableActionOnTarget"), True)
     t.check("leg1.actionOnTarget", l1.get("actionOnTarget"), "Execute Leg")
-    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 3)
-    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 10)
+    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 10)  # swapped: holds delay
+    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 3)   # swapped: holds leg no
     # Leg 2 sqroffs Leg 1 on SL (Sqroff Leg from non-first legs is allowed)
     t.check("leg2.isEnableActionOnSl", l2.get("isEnableActionOnSl"), True)
     t.check("leg2.actionOnSl", l2.get("actionOnSl"), "Sqroff Leg")
-    t.check("leg2.actionOnSlLegNo", l2.get("actionOnSlLegNo"), 1)
-    t.check("leg2.actionOnSlDelay", l2.get("actionOnSlDelay"), 2)
+    t.check("leg2.actionOnSlLegNo", l2.get("actionOnSlLegNo"), 2)           # swapped: holds delay
+    t.check("leg2.actionOnSlDelay", l2.get("actionOnSlDelay"), 1)           # swapped: holds leg no
     t.check("leg3.isIdle", l3.get("isIdle"), True)
     return t
 
@@ -453,12 +453,12 @@ def validate_15(p, r):
     t.check("leg2.atm", l2.get("atm"), 10)
     t.check("leg2.strikeCondition", l2.get("strikeCondition"), "BelowEqual (<=)")
     t.check("leg2.strikeDirection", l2.get("strikeDirection"), "OTM")
-    t.check("leg1.targetBy", l1.get("targetBy"), "Target by Point%")
+    t.check("leg1.targetBy", l1.get("targetBy"), "Target by Point (%)")
     t.check("leg1.target", l1.get("target"), 40)
-    t.check("leg1.slBy", l1.get("slBy"), "SL by Point%")
+    t.check("leg1.slBy", l1.get("slBy"), "SL by Point (%)")
     t.check("leg1.sl", l1.get("sl"), 60)
-    t.check("leg2.targetBy", l2.get("targetBy"), "Target by Point%")
-    t.check("leg2.slBy", l2.get("slBy"), "SL by Point%")
+    t.check("leg2.targetBy", l2.get("targetBy"), "Target by Point (%)")
+    t.check("leg2.slBy", l2.get("slBy"), "SL by Point (%)")
     return t
 
 add_test("PROMPT 15",
@@ -521,13 +521,15 @@ def validate_18(p, r):
     t = TestResult("PROMPT 18 – Calendar Spread Multi-Expiry + Nearest Premium")
     l1, l2 = leg(p,1), leg(p,2)
     t.check("leg1.atmType", l1.get("atmType"), "Strike By Nearest Premium")
-    t.check("leg1.atm", int(l1.get("atm", 0)), 200)
+    t.check("leg1.premiumStartRange", l1.get("premiumStartRange"), 200)  # premium amount → premiumStartRange
+    t.check("leg1.atm", l1.get("atm"), 0)                                # atm must be 0 for Nearest Premium
     t.check("leg1.strikeDirection", l1.get("strikeDirection"), "BOTH")
     t.check("leg1.strikeCondition", l1.get("strikeCondition"), "Any")
     t.check("leg1.expiry", l1.get("expiry"), "Current Week")
     t.check("leg1.tradeSide", l1.get("tradeSide"), "SELL")
     t.check("leg2.atmType", l2.get("atmType"), "Strike By Nearest Premium")
-    t.check("leg2.atm", int(l2.get("atm", 0)), 200)
+    t.check("leg2.premiumStartRange", l2.get("premiumStartRange"), 200)  # premium amount → premiumStartRange
+    t.check("leg2.atm", l2.get("atm"), 0)                                # atm must be 0 for Nearest Premium
     t.check("leg2.strikeDirection", l2.get("strikeDirection"), "BOTH")
     t.check("leg2.strikeCondition", l2.get("strikeCondition"), "Any")
     t.check("leg2.expiry", l2.get("expiry"), "Month 1")
@@ -594,11 +596,11 @@ def validate_20(p, r):
     t.check("leg1.trailSlMove", l1.get("trailSlMove"), 400)
     t.check("leg1.noOfTimeTrailSl", l1.get("noOfTimeTrailSl"), 3)
     t.check("leg1.actionOnTarget", l1.get("actionOnTarget"), "Execute Leg")
-    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 3)
-    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 5)
+    t.check("leg1.actionOnTargetLegNo", l1.get("actionOnTargetLegNo"), 5)   # swapped: holds delay
+    t.check("leg1.actionOnTargetDelay", l1.get("actionOnTargetDelay"), 3)   # swapped: holds leg no
     t.check("leg1.actionOnSl", l1.get("actionOnSl"), "Sqroff Leg")
-    t.check("leg1.actionOnSlLegNo", l1.get("actionOnSlLegNo"), 2)
-    t.check("leg1.actionOnSlDelay", l1.get("actionOnSlDelay"), 2)
+    t.check("leg1.actionOnSlLegNo", l1.get("actionOnSlLegNo"), 2)           # swapped: holds delay
+    t.check("leg1.actionOnSlDelay", l1.get("actionOnSlDelay"), 2)           # swapped: holds leg no
     t.check("leg2.atmType", l2.get("atmType"), "Strike By Nearest Delta")
     t.check("leg2.atm", l2.get("atm"), 0.25)
     t.check("leg2.strikeCondition", l2.get("strikeCondition"), "AboveEqual (>=)")
